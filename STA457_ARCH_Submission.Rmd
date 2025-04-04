@@ -1,0 +1,129 @@
+---
+title: "STA457 Final ProjectARCH/GARCH"
+output: pdf_document
+date: "2025-04-04"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# Load the necessary libraries
+library(tidyverse)
+library(ggplot2)
+library(forecast)
+library(zoo)
+library(dplyr)
+library(lubridate)
+library(timeSeries)
+library(fGarch)
+library(xts)
+library(rugarch)
+library(vars)
+library(ggplot2)
+library(tseries)
+library(astsa)
+```
+
+```{r}
+# Load the monthly cocoa data, created from STA457_Preprocessing_Submission.Rmd
+cocoa_monthly <- read.csv("cocoa_monthly.csv")
+```
+
+```{r}
+# Log and Difference the data, save as a dataset
+log_prices <- cocoa_monthly %>%
+  group_by(YearMonth) %>%
+  summarise(log_price = log(avg_price), na.rm = TRUE)
+
+log_diff_cocoa <- log_prices %>%
+  mutate(diff_price = c(NA, diff(log_price))) %>%
+  group_by(YearMonth)
+
+log_diff_cocoa$YearMonth <- as.Date(log_diff_cocoa$YearMonth, format = "%Y-%m-%d")
+log_diff_cocoa <- na.omit(log_diff_cocoa)
+print(log_diff_cocoa)
+```
+
+```{r}
+# Try a standard ARCH(1) fit, we know the orders from part a) of ARMA(1,0), ARMA(0,1), ARMA(6,7)
+ARCH_1_AR <- garchFit(~arma(1,0)+garch(1,0), data = log_diff_cocoa$diff_price, cond.dist='std')
+ARCH_1_MA <- garchFit(~arma(0,1)+garch(1,0), data = log_diff_cocoa$diff_price, cond.dist='std')
+ARCH_1_ARMA <- garchFit(~arma(6,7)+garch(1,0), data = log_diff_cocoa$diff_price, cond.dist='std')
+
+summary(ARCH_1_AR)
+summary(ARCH_1_MA)
+summary(ARCH_1_ARMA)
+
+# Try a GARCH(1,1) fit
+GARCH_AR <- garchFit(~arma(1,0)+garch(1,1), data = log_diff_cocoa$diff_price, cond.dist='std')
+GARCH_MA <- garchFit(~arma(0,1)+garch(1,1), data = log_diff_cocoa$diff_price, cond.dist='std')
+GARCH_ARMA <-garchFit(~arma(6,7)+garch(1,1), data = log_diff_cocoa$diff_price, cond.dist='std')
+
+summary(GARCH_AR)
+summary(GARCH_MA)
+summary(GARCH_ARMA)
+```
+
+## GARCH(1,1) on ARMA(0,1)
+```{r}
+# Set forecast horizon: last 6 months
+h <- 6
+n <- length(log_diff_cocoa$diff_price)  # n = length(diff(log_monthly)) = length(log_monthly) - 1
+
+# Partition the logged & differenced series into training and test sets
+train_diff <- log_diff_cocoa$diff_price[1:(n - h)]
+test_diff  <- log_diff_cocoa$diff_price[(n - h + 1):n]
+
+# Fit the GARCH model on the training set (using the ARMA(0,1) + GARCH(1,1) specification)
+GARCH_MA_train <- garchFit(~arma(0,1) + garch(1,1),
+                           data = train_diff,
+                           cond.dist = 'std')
+
+# Forecast h steps ahead on the transformed scale
+forecast_result <- predict(GARCH_MA_train, n.ahead = h)
+# Extract the forecasted differences (i.e. the mean forecast)
+forecast_diff <- forecast_result$meanForecast
+
+# To invert the differencing, you need the last observed logged price from the training period.
+# Here we assume that the original logged series is stored in 'log_monthly', where:
+# log_monthly <- log(monthly_prices)
+# Note: length(log_monthly) == n + 1.
+last_log_train <- log_prices$log_price[n - h + 1]
+
+# Reconstruct the forecasted logged prices by cumulatively summing the forecasted differences:
+forecast_log <- last_log_train + cumsum(forecast_diff)
+
+# Convert the forecasted logged prices back to the original scale:
+forecast_prices <- exp(forecast_log)
+
+# Get the actual test set prices on the original scale.
+# Since diff() reduces the series length by one, the test set in the original logged series 
+# corresponds to the last h + 1 values. Here, we take the forecast period starting at the index
+# following the training set's last logged price.
+actual_prices <- cocoa_monthly$avg_price[(n - h + 2):(n + 1)]
+
+# Calculate error metrics on the original scale:
+MAE  <- mean(abs(forecast_prices - actual_prices))
+RMSE <- sqrt(mean((forecast_prices - actual_prices)^2))
+MAPE <- mean(abs((forecast_prices - actual_prices) / actual_prices)) * 100
+
+# Print error metrics:
+cat("6-Month Forecast Accuracy on Original Scale:\n")
+cat("MAE:", MAE, "\n")
+cat("RMSE:", RMSE, "\n")
+cat("MAPE:", MAPE, "%\n")
+
+# Plot the actual vs. forecasted prices:
+# (Here we simply use the index as the time axis; adjust as needed if you have date information.)
+time_index <- seq(from = 1, to = h)
+plot(time_index, actual_prices, type = "l", col = "black", lwd = 2,
+     xlab = "Forecast Horizon (months)", ylab = "Monthly Price",
+     main = "Test Set: Actual vs Forecasted Prices")
+lines(time_index, forecast_prices, col = "red", lwd = 2, lty = 2)
+legend("topleft", legend = c("Actual", "Forecast"), col = c("black", "red"),
+       lty = c(1,2), lwd = 2)
+
+```

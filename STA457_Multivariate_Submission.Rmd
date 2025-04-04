@@ -1,0 +1,913 @@
+---
+title: "STA457 Final ProjectMultivariate Analysis"
+output: pdf_document
+date: "2025-04-04"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load the necessary libraries
+library(tidyverse)
+library(ggplot2)
+library(forecast)
+library(zoo)
+library(dplyr)
+library(lubridate)
+library(timeSeries)
+library(fGarch)
+library(xts)
+library(rugarch)
+library(vars)
+library(ggplot2)
+library(tseries)
+library(astsa)
+```
+
+
+
+# We merge the datasets, show joint stationarity
+```{r}
+# Load pre-processed monthly data, both created from STA457_Preprocessing_Submission.Rmd
+cocoa_monthly <- read.csv("cocoa_monthly.csv")
+ghana_monthly <- read.csv("ghana_monthly.csv")
+
+cocoa_monthly$YearMonth <- as.Date(cocoa_monthly$YearMonth, format = "%Y-%m-%d")
+ghana_monthly$YearMonth <- as.Date(ghana_monthly$YearMonth, format = "%Y-%m-%d")
+
+# Log and difference the dataset
+log_prices <- cocoa_monthly %>%
+  group_by(YearMonth) %>%
+  summarise(log_price = log(avg_price), na.rm = TRUE)
+
+log_diff_cocoa <- log_prices %>%
+  mutate(diff_price = c(NA, diff(log_price))) %>%
+  group_by(YearMonth)
+
+log_diff_cocoa$YearMonth <- as.Date(log_diff_cocoa$YearMonth, format = "%Y-%m-%d")
+ghana_monthly$YearMonth <- as.Date(ghana_monthly$YearMonth, format = "%Y-%m-%d")
+
+# Create separate monthly total precipitation and price dataset
+monthly_prec <- ghana_monthly %>%
+  mutate(YearMonth = floor_date(YearMonth, "month")) %>%
+  group_by(YearMonth) %>%
+  summarise(TotalPRCP)
+
+# Create separate monthly average temperature and price dataset
+monthly_temp <- ghana_monthly %>%
+  mutate(YearMonth = floor_date(YearMonth, "month")) %>%
+  group_by(YearMonth) %>%
+  summarise(MeanTAVG)
+
+
+# We merge the datasets
+multivariate_temp <- merge(log_diff_cocoa, monthly_prec, by = "YearMonth", all = FALSE)
+
+# Full, multivariate data
+multivariate_cocoa <- merge(multivariate_temp, monthly_temp, by = "YearMonth", all = FALSE)
+print(multivariate_cocoa)
+
+# Remove the NA
+multivariate_cocoa <- multivariate_cocoa %>%
+  dplyr::filter(!is.na(diff_price))
+
+adf.test(multivariate_cocoa$diff_price)
+adf.test(multivariate_cocoa$TotalPRCP)
+adf.test(multivariate_cocoa$MeanTAVG)
+
+```
+# Plot and heteroscedasticity measures for EDA
+```{r}
+# Plot average temperature and total precipitation values
+plot(ghana_monthly$MeanTAVG,
+     type="l")
+plot(ghana_monthly$TotalPRCP,
+     type="l")
+
+n_ghana = nrow(ghana_monthly)
+
+# Temperature Heteroscedasticity analysis
+# Split into half
+first_half_temp <- ghana_monthly$MeanTAVG[1:(n_ghana/2)]
+second_half_temp <- ghana_monthly$MeanTAVG[(n_ghana/2 + 1):n_ghana]
+
+# Compute sample variances for each half
+var_first_temp <- var(first_half_temp)
+var_second_temp <- var(second_half_temp)
+
+# Print the sample variances for each half
+cat("Sample variance for the first half of the mean temperature:", var_first_temp, "\n")
+cat("Sample variance for the second half of the mean temperature:", var_second_temp, "\n")
+
+# Split into last 2 years and the rest
+split_temp <- ghana_monthly$MeanTAVG[1:(n_ghana-26)]
+last_two_temp <- ghana_monthly$MeanTAVG[((n_ghana-26) + 1):n_ghana]
+
+# Compute into last 2 years and the rest
+var_split_temp <- var(split_temp)
+var_last_two_temp <- var(last_two_temp)
+
+# Print the sample variances
+cat("Sample variance until the last two years of mean temperature:", var_split_temp, "\n")
+cat("Sample variance since 2023 of mean temperature:", var_last_two_temp, "\n")
+
+
+
+# Precipitation Heteroscedasticity analysis
+# Split into half
+first_half_prec <- ghana_monthly$TotalPRCP[1:(n_ghana/2)]
+second_half_prec <- ghana_monthly$TotalPRCP[(n_ghana/2 + 1):n_ghana]
+
+# Compute sample variances for each half
+var_first_prec <- var(first_half_prec)
+var_second_prec <- var(second_half_prec)
+
+# Print the sample variances for each half
+cat("Sample variance for the first half of the total precipitation:", var_first_prec, "\n")
+cat("Sample variance for the second half of the total precipitation:", var_second_prec, "\n")
+
+# Split into last 2 years and the rest
+split_prec <- ghana_monthly$TotalPRCP[1:(n_ghana-26)]
+last_two_prec <- ghana_monthly$TotalPRCP[((n_ghana-26) + 1):n_ghana]
+
+# Compute into last 2 years and the rest
+var_split_prec <- var(split_prec)
+var_last_two_prec <- var(last_two_prec)
+
+# Print the sample variances
+cat("Sample variance until the last two years of total precipitation:", var_split_prec, "\n")
+cat("Sample variance since 2023 of total precipitation:", var_last_two_prec, "\n")
+
+```
+
+## Mean Tempersture does not show significant changing variance over time
+
+# Cross-correlation plots for dependance orders
+```{r}
+# cross correlation functions
+ccf_temp_avg <- ccf(multivariate_cocoa$diff_price, multivariate_cocoa$MeanTAVG, lag = 60)
+ccf_prcp <- ccf(multivariate_cocoa$diff_price, multivariate_cocoa$TotalPRCP, lag = 60)
+
+# Extract the correlation values (acf) and the corresponding lags 
+corr_values_temp <- as.numeric(ccf_temp_avg$acf)
+lags_tmpavg <- ccf_temp_avg$lag
+
+corr_values_prcp <- as.numeric(ccf_prcp$acf)
+lags_prcp <- ccf_prcp$lag
+
+# Find the index of the largest correlation in absolute value
+id_tmpavg <- which.max(abs(corr_values_temp))
+id_prcp <- which.max(abs(corr_values_prcp))
+
+# Retrieve the correlation and the corresponding lag
+largest_corr_temp <- corr_values_temp[id_tmpavg]
+largest_lag_temp <- lags_tmpavg[id_tmpavg]
+
+largest_corr_prcp <- corr_values_prcp[id_prcp]
+largest_lag_prcp <- lags_prcp[id_prcp]
+
+cat("The largest absolute correlation for the mean temperature is", largest_corr_temp, "at lag", largest_lag_temp, "\n")
+
+cat("The largest absolute correlation for the total precipitation is", largest_corr_prcp, "at lag", largest_lag_prcp, "\n")
+```
+# Create new datasets with dependance orders in tact.
+```{r}
+# Create a new column with the time 6 months prior for each row 
+log_diff_cocoa$lag_YearMonth_temp <- log_diff_cocoa$YearMonth %m-% months(6)
+
+# Merge datasets match each cocoa price with average temperature from 6 months ago
+df_temp <- merge(
+  log_diff_cocoa[, c("YearMonth", "log_price", "lag_YearMonth_temp")],
+  ghana_monthly[, c("YearMonth", "MeanTAVG")],
+  by.x = "lag_YearMonth_temp",
+  by.y = "YearMonth",
+  all.x = TRUE
+)
+
+# Create a new column with the time 44 months prior for each row 
+log_diff_cocoa$lag_YearMonth_prec <- log_diff_cocoa$YearMonth %m-% months(44)
+
+# Merge datasets match each cocoa price with the total precipitation from 44 months ago
+df_prec <- merge(
+  log_diff_cocoa[, c("YearMonth", "log_price", "lag_YearMonth_prec")],
+  ghana_monthly[, c("YearMonth", "TotalPRCP")],
+  by.x = "lag_YearMonth_prec",
+  by.y = "YearMonth",
+  all.x = TRUE
+)
+
+# Remove NA values
+df_temp <- df_temp %>%
+  dplyr::filter(!is.na(MeanTAVG))
+
+df_prec <- df_prec %>%
+  dplyr::filter(!is.na(TotalPRCP))
+
+# Preview the resulting datasets
+print(df_temp)
+print(df_prec)
+
+```
+
+
+```{r}
+# Ljung-Box test function with standardized residuals
+plot_ljung_box <- function(model, model_name = deparse(substitute(model)), max_lag = 20) {
+  p_values <- sapply(1:max_lag, function(lag) Box.test(resid(model) / sqrt(model$sigma2),
+  lag = lag, type = "Ljung-Box")$p.value)
+  
+  df <- data.frame(Lag = 1:max_lag, P_Value = p_values)
+  
+  ggplot(df, aes(x = Lag, y = P_Value)) +
+    geom_point(shape = 1, size = 3) +  # Open circles
+    geom_hline(yintercept = 0.05, linetype = "dashed", color = "blue") +  # Significance threshold
+    ylim(0, 1) +
+    labs(title = paste("p values for Ljung-Box statistic for", model_name),
+         x = "LAG (H)",
+         y = "p value") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      axis.title = element_text(size = 12)
+    )
+}
+```
+
+# ARIMAX model implementation
+```{r}
+# ARIMAX with 6-step behind average temperature 
+## ARIMA(1,1,0)
+arimax1_temp <- arima(df_temp$log_price, c(1,1,0), xreg = df_temp$MeanTAVG)
+## ARIMA(0,1,1)
+arimax2_temp <- arima(df_temp$log_price, c(0,1,1), xreg = df_temp$MeanTAVG)
+## ARIMA(6,1,7)
+arimax3_temp <- arima(df_temp$log_price, c(6,1,7), xreg = df_temp$MeanTAVG)
+
+# ARIMAX with 44-step behind total precipitation
+## ARIMA(1,1,0)
+arimax1_prec <- arima(df_prec$log_price, c(1,1,0), xreg = df_prec$TotalPRCP)
+## ARIMA(0,1,1)
+arimax2_prec <- arima(df_prec$log_price, c(0,1,1), xreg = df_prec$TotalPRCP)
+## ARIMA(6,1,7)
+arimax3_prec <- arima(df_prec$log_price, c(6,1,7), xreg = df_prec$TotalPRCP)
+
+# Residual Analysis of temperature ARIMAX models
+## Ljung-Box Plots
+plot_ljung_box(arimax1_temp)
+plot_ljung_box(arimax2_temp)
+plot_ljung_box(arimax3_temp)
+## Retrieve Standardized Residuals
+stand_arimax_AR = resid(arimax1_temp) / sqrt(arimax1_temp$sigma2)
+stand_arimax_MA = resid(arimax2_temp) / sqrt(arimax2_temp$sigma2)
+stand_arimax_ARMA = resid(arimax3_temp) / sqrt(arimax3_temp$sigma2)
+## QQ plot for AR component ARIMAX
+qqnorm(stand_arimax_AR)
+qqline(stand_arimax_AR, col = "red")
+## QQ plot for MA component ARIMAX
+qqnorm(stand_arimax_MA)
+qqline(stand_arimax_MA, col = "blue")
+## QQ plot for ARMA component ARIMAX
+qqnorm(stand_arimax_ARMA)
+qqline(stand_arimax_ARMA, col = "green")
+## Summary
+summary(arimax1_temp) # aic = -972.52
+summary(arimax2_temp) # aic = -974.00
+summary(arimax3_temp) # aic = -969.20
+
+# Residual Analysis of Precipitation ARIMAX models
+## Ljung-Box Plots
+plot_ljung_box(arimax1_prec)
+plot_ljung_box(arimax2_prec)
+plot_ljung_box(arimax3_prec)
+## Retrieve Standardized Residuals
+stand_arimax_AR_prec = resid(arimax1_prec) / sqrt(arimax1_prec$sigma2)
+stand_arimax_MA_prec = resid(arimax2_prec) / sqrt(arimax2_prec$sigma2)
+stand_arimax_ARMA_prec = resid(arimax3_prec) / sqrt(arimax3_prec$sigma2)
+
+## QQ plot for AR component ARIMAX
+qqnorm(stand_arimax_AR_prec)
+qqline(stand_arimax_AR_prec, col = "red")
+## QQ plot for MA component ARIMAX
+qqnorm(stand_arimax_MA_prec)
+qqline(stand_arimax_MA_prec, col = "blue")
+## QQ plot for ARMA component ARIMAX
+qqnorm(stand_arimax_ARMA_prec)
+qqline(stand_arimax_ARMA_prec, col = "green")
+
+## Summary
+summary(arimax1_prec) # aic = -970.79
+summary(arimax2_prec) # aic = -970.02
+summary(arimax3_prec) # aic = -979.55
+
+```
+## Residual assumptions look satisfied for all models.
+
+# Train/test plots and errors.
+## Using ARIMAX (6,1,7) + temperature for train/test set.
+```{r}
+# Load necessary libraries so they do not get mixed up 
+library(forecast)
+library(stats) 
+library(ggplot2)
+library(lubridate)
+
+# Ensure the data is sorted chronologically by YearMonth
+df_temp <- df_temp[order(df_temp$YearMonth), ]
+
+# Determine the start year and month for the time series
+start_year <- year(df_temp$YearMonth[1])
+start_month <- month(df_temp$YearMonth[1])
+
+# Create time series objects for log_price and the external regressor
+# Frequency is 12 for monthly data
+log_price_ts <- ts(df_temp$log_price, start = c(start_year, start_month), frequency = 12)
+mean_tavg_ts <- ts(df_temp$MeanTAVG, start = c(start_year, start_month), frequency = 12)
+
+# Determine the total length and the forecast horizon (last 6 months)
+n <- length(log_price_ts)
+h6 <- 6 # Forecast horizon
+
+# Create training sets using window()
+train_log_price <- window(log_price_ts, end = time(log_price_ts)[n - h6])
+train_xreg_ts   <- window(mean_tavg_ts, end = time(mean_tavg_ts)[n - h6])
+
+# Create test sets using window()
+test_log_price <- window(log_price_ts, start = time(log_price_ts)[n - h6 + 1])
+test_xreg_ts   <- window(mean_tavg_ts, start = time(mean_tavg_ts)[n - h6 + 1])
+test_dates     <- time(test_log_price) # Get numeric time index for plotting/dataframe
+
+# Convert train_xreg_ts to matrix 
+train_xreg_matrix <- as.matrix(train_xreg_ts)
+colnames(train_xreg_matrix) <- c("MeanTAVG") 
+
+# Fit the ARIMAX(6,1,7) model 
+model_arimax_6m <- tryCatch({
+  # Using forecast::Arima
+  Arima(train_log_price, order = c(6, 1, 7), xreg = train_xreg_matrix)
+}, error = function(e) {
+  cat("Error fitting Arima model:", conditionMessage(e), "\n")
+  return(NULL)
+})
+
+# Forecast on the Test Set ---
+if (!is.null(model_arimax_6m)) {
+
+  # Convert test_xreg_ts to matrix 
+  test_xreg_matrix <- as.matrix(test_xreg_ts)
+  colnames(test_xreg_matrix) <- c("MeanTAVG")
+  fc6_arimax <- forecast(model_arimax_6m, h = h6, xreg = test_xreg_matrix)
+
+  # Compute accuracy metrics using forecast::accuracy() on the log scale forecast object
+  accuracy6_log <- accuracy(fc6_arimax, test_log_price)
+  cat("ARIMAX(6,1,7) 6-Month Forecast Accuracy (Log Scale):\n")
+  print(accuracy6_log)
+
+    # Convert forecasts (mean) and actual test values back to the original price scale
+  fc6_orig <- exp(fc6_arimax$mean)
+  actual6_orig <- exp(test_log_price)
+
+  # Compute error metrics manually on the original scale
+  mae_orig <- mean(abs(fc6_orig - actual6_orig))
+  rmse_orig <- sqrt(mean((fc6_orig - actual6_orig)^2))
+  # Add a small epsilon to actual6_orig denominator to avoid division by zero if necessary
+  mape_orig <- mean(abs((fc6_orig - actual6_orig) / (actual6_orig + 1e-10))) * 100
+
+  # Print the results for the original scale
+  cat("\nARIMAX(6,1,7) 6-Month Forecast Accuracy on Original Scale:\n")
+  cat("MAE:", mae_orig, "\n")
+  cat("RMSE:", rmse_orig, "\n")
+  cat("MAPE:", mape_orig, "%\n")
+
+# Create a data frame for plogginb
+  df6_arimax <- data.frame(
+    Month = as.numeric(test_dates), # Use the numeric time index
+    Actual = as.numeric(actual6_orig),
+    Forecast = as.numeric(fc6_orig)
+  )
+
+  # Create the plot 
+  p6_arimax <- ggplot(df6_arimax, aes(x = Month)) +
+    geom_line(aes(y = Actual, color = "Actual"), linewidth = 1) +
+    geom_line(aes(y = Forecast, color = "Forecast"), linewidth = 1, linetype = "dashed") +
+    scale_color_manual(name = "Legend", values = c("Actual" = "blue", "Forecast" = "red")) + # Manual colors
+    labs(title = "ARIMAX(6,1,7) with Temperature 6-Month Forecast vs Actual",
+         y = "Price (Original Scale)",
+         x = "Time Index") + 
+    theme_minimal() +
+    theme(legend.position = "top")
+
+  # Print the plot
+  print(p6_arimax)
+
+} else {
+  cat("Skipping prediction, evaluation, and plotting due to model fitting error.\n")
+}
+```
+
+## Using ARIMAX (1,1,0) + temperature for train/test set.
+```{r}
+# Load necessary libraries so they do not get mixed up 
+library(forecast)
+library(stats) 
+library(ggplot2)
+library(lubridate)
+
+# Ensure the data is sorted chronologically by YearMonth
+df_temp <- df_temp[order(df_temp$YearMonth), ]
+
+# Determine the start year and month for the time series
+start_year <- year(df_temp$YearMonth[1])
+start_month <- month(df_temp$YearMonth[1])
+
+# Create time series objects for log_price and the external regressor
+# Frequency is 12 for monthly data
+log_price_ts <- ts(df_temp$log_price, start = c(start_year, start_month), frequency = 12)
+mean_tavg_ts <- ts(df_temp$MeanTAVG, start = c(start_year, start_month), frequency = 12)
+
+# Determine the total length and the forecast horizon (last 6 months)
+n <- length(log_price_ts)
+h6 <- 6 # Forecast horizon
+
+# Create training sets using window()
+train_log_price <- window(log_price_ts, end = time(log_price_ts)[n - h6])
+train_xreg_ts   <- window(mean_tavg_ts, end = time(mean_tavg_ts)[n - h6])
+
+# Create test sets using window()
+test_log_price <- window(log_price_ts, start = time(log_price_ts)[n - h6 + 1])
+test_xreg_ts   <- window(mean_tavg_ts, start = time(mean_tavg_ts)[n - h6 + 1])
+test_dates     <- time(test_log_price) # Get numeric time index for plotting/dataframe
+
+# Convert train_xreg_ts to matrix 
+train_xreg_matrix <- as.matrix(train_xreg_ts)
+colnames(train_xreg_matrix) <- c("MeanTAVG") 
+
+# Fit the ARIMAX(1,1,0) model 
+model_arimax_6m <- tryCatch({
+  # Using forecast::Arima
+  Arima(train_log_price, order = c(1, 1, 0), xreg = train_xreg_matrix)
+}, error = function(e) {
+  cat("Error fitting Arima model:", conditionMessage(e), "\n")
+  return(NULL)
+})
+
+# Forecast on the Test Set ---
+if (!is.null(model_arimax_6m)) {
+
+  # Convert test_xreg_ts to matrix 
+  test_xreg_matrix <- as.matrix(test_xreg_ts)
+  colnames(test_xreg_matrix) <- c("MeanTAVG")
+  fc6_arimax <- forecast(model_arimax_6m, h = h6, xreg = test_xreg_matrix)
+
+  # Compute accuracy metrics using forecast::accuracy() on the log scale forecast object
+  accuracy6_log <- accuracy(fc6_arimax, test_log_price)
+  cat("ARIMAX(1,1,0) 6-Month Forecast Accuracy (Log Scale):\n")
+  print(accuracy6_log)
+
+    # Convert forecasts (mean) and actual test values back to the original price scale
+  fc6_orig <- exp(fc6_arimax$mean)
+  actual6_orig <- exp(test_log_price)
+
+  # Compute error metrics manually on the original scale
+  mae_orig <- mean(abs(fc6_orig - actual6_orig))
+  rmse_orig <- sqrt(mean((fc6_orig - actual6_orig)^2))
+  # Add a small epsilon to actual6_orig denominator to avoid division by zero if necessary
+  mape_orig <- mean(abs((fc6_orig - actual6_orig) / (actual6_orig + 1e-10))) * 100
+
+  # Print the results for the original scale
+  cat("\nARIMAX(1,1,0) 6-Month Forecast Accuracy on Original Scale:\n")
+  cat("MAE:", mae_orig, "\n")
+  cat("RMSE:", rmse_orig, "\n")
+  cat("MAPE:", mape_orig, "%\n")
+
+# Create a data frame for plogginb
+  df6_arimax <- data.frame(
+    Month = as.numeric(test_dates), # Use the numeric time index
+    Actual = as.numeric(actual6_orig),
+    Forecast = as.numeric(fc6_orig)
+  )
+
+  # Create the plot 
+  p6_arimax <- ggplot(df6_arimax, aes(x = Month)) +
+    geom_line(aes(y = Actual, color = "Actual"), linewidth = 1) +
+    geom_line(aes(y = Forecast, color = "Forecast"), linewidth = 1, linetype = "dashed") +
+    scale_color_manual(name = "Legend", values = c("Actual" = "blue", "Forecast" = "red")) + # Manual colors
+    labs(title = "ARIMAX(1,1,0) 6-Month Forecast vs Actual (Original Scale)",
+         y = "Price (Original Scale)",
+         x = "Time Index") + 
+    theme_minimal() +
+    theme(legend.position = "top")
+
+  # Print the plot
+  print(p6_arimax)
+
+} else {
+  cat("Skipping prediction, evaluation, and plotting due to model fitting error.\n")
+}
+```
+
+## Using ARIMAX (0,1,1) + temperature for train/test set.
+```{r}
+# Load necessary libraries so they do not get mixed up 
+library(forecast)
+library(stats) 
+library(ggplot2)
+library(lubridate)
+
+# Ensure the data is sorted chronologically by YearMonth
+df_temp <- df_temp[order(df_temp$YearMonth), ]
+
+# Determine the start year and month for the time series
+start_year <- year(df_temp$YearMonth[1])
+start_month <- month(df_temp$YearMonth[1])
+
+# Create time series objects for log_price and the external regressor
+# Frequency is 12 for monthly data
+log_price_ts <- ts(df_temp$log_price, start = c(start_year, start_month), frequency = 12)
+mean_tavg_ts <- ts(df_temp$MeanTAVG, start = c(start_year, start_month), frequency = 12)
+
+# Determine the total length and the forecast horizon (last 6 months)
+n <- length(log_price_ts)
+h6 <- 6 # Forecast horizon
+
+# Create training sets using window()
+train_log_price <- window(log_price_ts, end = time(log_price_ts)[n - h6])
+train_xreg_ts   <- window(mean_tavg_ts, end = time(mean_tavg_ts)[n - h6])
+
+# Create test sets using window()
+test_log_price <- window(log_price_ts, start = time(log_price_ts)[n - h6 + 1])
+test_xreg_ts   <- window(mean_tavg_ts, start = time(mean_tavg_ts)[n - h6 + 1])
+test_dates     <- time(test_log_price) # Get numeric time index for plotting/dataframe
+
+# Convert train_xreg_ts to matrix 
+train_xreg_matrix <- as.matrix(train_xreg_ts)
+colnames(train_xreg_matrix) <- c("MeanTAVG") 
+
+# Fit the ARIMAX(0,1,1) model 
+model_arimax_6m <- tryCatch({
+  # Using forecast::Arima
+  Arima(train_log_price, order = c(0, 1, 1), xreg = train_xreg_matrix)
+}, error = function(e) {
+  cat("Error fitting Arima model:", conditionMessage(e), "\n")
+  return(NULL)
+})
+
+# Forecast on the Test Set ---
+if (!is.null(model_arimax_6m)) {
+
+  # Convert test_xreg_ts to matrix 
+  test_xreg_matrix <- as.matrix(test_xreg_ts)
+  colnames(test_xreg_matrix) <- c("MeanTAVG")
+  fc6_arimax <- forecast(model_arimax_6m, h = h6, xreg = test_xreg_matrix)
+
+  # Compute accuracy metrics using forecast::accuracy() on the log scale forecast object
+  accuracy6_log <- accuracy(fc6_arimax, test_log_price)
+  cat("ARIMAX(1,1,0) 6-Month Forecast Accuracy (Log Scale):\n")
+  print(accuracy6_log)
+
+    # Convert forecasts (mean) and actual test values back to the original price scale
+  fc6_orig <- exp(fc6_arimax$mean)
+  actual6_orig <- exp(test_log_price)
+
+  # Compute error metrics manually on the original scale
+  mae_orig <- mean(abs(fc6_orig - actual6_orig))
+  rmse_orig <- sqrt(mean((fc6_orig - actual6_orig)^2))
+  # Add a small epsilon to actual6_orig denominator to avoid division by zero if necessary
+  mape_orig <- mean(abs((fc6_orig - actual6_orig) / (actual6_orig + 1e-10))) * 100
+
+  # Print the results for the original scale
+  cat("\nARIMAX(0,1,1) 6-Month Forecast Accuracy on Original Scale:\n")
+  cat("MAE:", mae_orig, "\n")
+  cat("RMSE:", rmse_orig, "\n")
+  cat("MAPE:", mape_orig, "%\n")
+
+# Create a data frame for plogginb
+  df6_arimax <- data.frame(
+    Month = as.numeric(test_dates), # Use the numeric time index
+    Actual = as.numeric(actual6_orig),
+    Forecast = as.numeric(fc6_orig)
+  )
+
+  # Create the plot 
+  p6_arimax <- ggplot(df6_arimax, aes(x = Month)) +
+    geom_line(aes(y = Actual, color = "Actual"), linewidth = 1) +
+    geom_line(aes(y = Forecast, color = "Forecast"), linewidth = 1, linetype = "dashed") +
+    scale_color_manual(name = "Legend", values = c("Actual" = "blue", "Forecast" = "red")) + # Manual colors
+    labs(title = "ARIMAX(0,1,1) 6-Month Forecast vs Actual (Original Scale)",
+         y = "Price (Original Scale)",
+         x = "Time Index") + 
+    theme_minimal() +
+    theme(legend.position = "top")
+
+  # Print the plot
+  print(p6_arimax)
+
+} else {
+  cat("Skipping prediction, evaluation, and plotting due to model fitting error.\n")
+}
+```
+
+## Using ARIMAX (1,1,0) + precipitation for train/test set.
+```{r}
+# Load necessary libraries so they do not get mixed up 
+library(forecast)
+library(stats) 
+library(ggplot2)
+library(lubridate)
+
+# Ensure the data is sorted chronologically by YearMonth
+df_prec <- df_prec[order(df_prec$YearMonth), ]
+
+# Determine the start year and month for the time series
+start_year <- year(df_prec$YearMonth[1])
+start_month <- month(df_prec$YearMonth[1])
+
+# Create time series objects for log_price and the external regressor
+# Frequency is 12 for monthly data
+log_price_ts <- ts(df_prec$log_price, start = c(start_year, start_month), frequency = 12)
+total_prcp_ts <- ts(df_prec$TotalPRCP, start = c(start_year, start_month), frequency = 12)
+
+# Determine the total length and the forecast horizon (last 6 months)
+n <- length(log_price_ts)
+h6 <- 6 # Forecast horizon
+
+# Create training sets using window()
+train_log_price <- window(log_price_ts, end = time(log_price_ts)[n - h6])
+train_xreg_ts   <- window(total_prcp_ts, end = time(total_prcp_ts)[n - h6])
+
+# Create test sets using window()
+test_log_price <- window(log_price_ts, start = time(log_price_ts)[n - h6 + 1])
+test_xreg_ts   <- window(total_prcp_ts, start = time(total_prcp_ts)[n - h6 + 1])
+test_dates     <- time(test_log_price) # Get numeric time index for plotting/dataframe
+
+# Convert train_xreg_ts to matrix 
+train_xreg_matrix <- as.matrix(train_xreg_ts)
+colnames(train_xreg_matrix) <- c("TotalPRCP") 
+
+# Fit the ARIMAX(1,1,0) model 
+model_arimax_6m <- tryCatch({
+  # Using forecast::Arima
+  Arima(train_log_price, order = c(1, 1, 0), xreg = train_xreg_matrix)
+}, error = function(e) {
+  cat("Error fitting Arima model:", conditionMessage(e), "\n")
+  return(NULL)
+})
+
+# Forecast on the Test Set ---
+if (!is.null(model_arimax_6m)) {
+
+  # Convert test_xreg_ts to matrix 
+  test_xreg_matrix <- as.matrix(test_xreg_ts)
+  colnames(test_xreg_matrix) <- c("TotalPRCP")
+  fc6_arimax <- forecast(model_arimax_6m, h = h6, xreg = test_xreg_matrix)
+
+  # Compute accuracy metrics using forecast::accuracy() on the log scale forecast object
+  accuracy6_log <- accuracy(fc6_arimax, test_log_price)
+  cat("ARIMAX(1,1,0) 6-Month Forecast Accuracy (Log Scale):\n")
+  print(accuracy6_log)
+
+    # Convert forecasts (mean) and actual test values back to the original price scale
+  fc6_orig <- exp(fc6_arimax$mean)
+  actual6_orig <- exp(test_log_price)
+
+  # Compute error metrics manually on the original scale
+  mae_orig <- mean(abs(fc6_orig - actual6_orig))
+  rmse_orig <- sqrt(mean((fc6_orig - actual6_orig)^2))
+  # Add a small epsilon to actual6_orig denominator to avoid division by zero if necessary
+  mape_orig <- mean(abs((fc6_orig - actual6_orig) / (actual6_orig + 1e-10))) * 100
+
+  # Print the results for the original scale
+  cat("\nARIMAX(1,1,0) 6-Month Forecast Accuracy on Original Scale:\n")
+  cat("MAE:", mae_orig, "\n")
+  cat("RMSE:", rmse_orig, "\n")
+  cat("MAPE:", mape_orig, "%\n")
+
+# Create a data frame for plogginb
+  df6_arimax <- data.frame(
+    Month = as.numeric(test_dates), # Use the numeric time index
+    Actual = as.numeric(actual6_orig),
+    Forecast = as.numeric(fc6_orig)
+  )
+
+  # Create the plot 
+  p6_arimax <- ggplot(df6_arimax, aes(x = Month)) +
+    geom_line(aes(y = Actual, color = "Actual"), linewidth = 1) +
+    geom_line(aes(y = Forecast, color = "Forecast"), linewidth = 1, linetype = "dashed") +
+    scale_color_manual(name = "Legend", values = c("Actual" = "blue", "Forecast" = "red")) + # Manual colors
+    labs(title = "ARIMAX(1,1,0) 6-Month Forecast vs Actual (Original Scale)",
+         y = "Price (Original Scale)",
+         x = "Time Index") + 
+    theme_minimal() +
+    theme(legend.position = "top")
+
+  # Print the plot
+  print(p6_arimax)
+
+} else {
+  cat("Skipping prediction, evaluation, and plotting due to model fitting error.\n")
+}
+```
+
+## Using ARIMAX (0,1,1) + precipitation for train/test set.
+```{r}
+# Load necessary libraries so they do not get mixed up 
+library(forecast)
+library(stats) 
+library(ggplot2)
+library(lubridate)
+
+# Ensure the data is sorted chronologically by YearMonth
+df_prec <- df_prec[order(df_prec$YearMonth), ]
+
+# Determine the start year and month for the time series
+start_year <- year(df_prec$YearMonth[1])
+start_month <- month(df_prec$YearMonth[1])
+
+# Create time series objects for log_price and the external regressor
+# Frequency is 12 for monthly data
+log_price_ts <- ts(df_prec$log_price, start = c(start_year, start_month), frequency = 12)
+total_prcp_ts <- ts(df_prec$TotalPRCP, start = c(start_year, start_month), frequency = 12)
+
+# Determine the total length and the forecast horizon (last 6 months)
+n <- length(log_price_ts)
+h6 <- 6 # Forecast horizon
+
+# Create training sets using window()
+train_log_price <- window(log_price_ts, end = time(log_price_ts)[n - h6])
+train_xreg_ts   <- window(total_prcp_ts, end = time(total_prcp_ts)[n - h6])
+
+# Create test sets using window()
+test_log_price <- window(log_price_ts, start = time(log_price_ts)[n - h6 + 1])
+test_xreg_ts   <- window(total_prcp_ts, start = time(total_prcp_ts)[n - h6 + 1])
+test_dates     <- time(test_log_price) # Get numeric time index for plotting/dataframe
+
+# Convert train_xreg_ts to matrix 
+train_xreg_matrix <- as.matrix(train_xreg_ts)
+colnames(train_xreg_matrix) <- c("TotalPRCP") 
+
+# Fit the ARIMAX(0,1,1) model 
+model_arimax_6m <- tryCatch({
+  # Using forecast::Arima
+  Arima(train_log_price, order = c(0, 1, 1), xreg = train_xreg_matrix)
+}, error = function(e) {
+  cat("Error fitting Arima model:", conditionMessage(e), "\n")
+  return(NULL)
+})
+
+# Forecast on the Test Set ---
+if (!is.null(model_arimax_6m)) {
+
+  # Convert test_xreg_ts to matrix 
+  test_xreg_matrix <- as.matrix(test_xreg_ts)
+  colnames(test_xreg_matrix) <- c("TotalPRCP")
+  fc6_arimax <- forecast(model_arimax_6m, h = h6, xreg = test_xreg_matrix)
+
+  # Compute accuracy metrics using forecast::accuracy() on the log scale forecast object
+  accuracy6_log <- accuracy(fc6_arimax, test_log_price)
+  cat("ARIMAX(1,1,0) 6-Month Forecast Accuracy (Log Scale):\n")
+  print(accuracy6_log)
+
+    # Convert forecasts (mean) and actual test values back to the original price scale
+  fc6_orig <- exp(fc6_arimax$mean)
+  actual6_orig <- exp(test_log_price)
+
+  # Compute error metrics manually on the original scale
+  mae_orig <- mean(abs(fc6_orig - actual6_orig))
+  rmse_orig <- sqrt(mean((fc6_orig - actual6_orig)^2))
+  # Add a small epsilon to actual6_orig denominator to avoid division by zero if necessary
+  mape_orig <- mean(abs((fc6_orig - actual6_orig) / (actual6_orig + 1e-10))) * 100
+
+  # Print the results for the original scale
+  cat("\nARIMAX(0,1,1) 6-Month Forecast Accuracy on Original Scale:\n")
+  cat("MAE:", mae_orig, "\n")
+  cat("RMSE:", rmse_orig, "\n")
+  cat("MAPE:", mape_orig, "%\n")
+
+# Create a data frame for plogginb
+  df6_arimax <- data.frame(
+    Month = as.numeric(test_dates), # Use the numeric time index
+    Actual = as.numeric(actual6_orig),
+    Forecast = as.numeric(fc6_orig)
+  )
+
+  # Create the plot 
+  p6_arimax <- ggplot(df6_arimax, aes(x = Month)) +
+    geom_line(aes(y = Actual, color = "Actual"), linewidth = 1) +
+    geom_line(aes(y = Forecast, color = "Forecast"), linewidth = 1, linetype = "dashed") +
+    scale_color_manual(name = "Legend", values = c("Actual" = "blue", "Forecast" = "red")) + # Manual colors
+    labs(title = "ARIMAX(0,1,1) 6-Month Forecast vs Actual (Original Scale)",
+         y = "Price (Original Scale)",
+         x = "Time Index") + 
+    theme_minimal() +
+    theme(legend.position = "top")
+
+  # Print the plot
+  print(p6_arimax)
+
+} else {
+  cat("Skipping prediction, evaluation, and plotting due to model fitting error.\n")
+}
+```
+
+## Using ARIMAX (6,1,7) + precipitation for train/test set.
+```{r}
+# Load necessary libraries so they do not get mixed up 
+library(forecast)
+library(stats) 
+library(ggplot2)
+library(lubridate)
+
+# Ensure the data is sorted chronologically by YearMonth
+df_prec <- df_prec[order(df_prec$YearMonth), ]
+
+# Determine the start year and month for the time series
+start_year <- year(df_prec$YearMonth[1])
+start_month <- month(df_prec$YearMonth[1])
+
+# Create time series objects for log_price and the external regressor
+# Frequency is 12 for monthly data
+log_price_ts <- ts(df_prec$log_price, start = c(start_year, start_month), frequency = 12)
+total_prcp_ts <- ts(df_prec$TotalPRCP, start = c(start_year, start_month), frequency = 12)
+
+# Determine the total length and the forecast horizon (last 6 months)
+n <- length(log_price_ts)
+h6 <- 6 # Forecast horizon
+
+# Create training sets using window()
+train_log_price <- window(log_price_ts, end = time(log_price_ts)[n - h6])
+train_xreg_ts   <- window(total_prcp_ts, end = time(total_prcp_ts)[n - h6])
+
+# Create test sets using window()
+test_log_price <- window(log_price_ts, start = time(log_price_ts)[n - h6 + 1])
+test_xreg_ts   <- window(total_prcp_ts, start = time(total_prcp_ts)[n - h6 + 1])
+test_dates     <- time(test_log_price) # Get numeric time index for plotting/dataframe
+
+# Convert train_xreg_ts to matrix 
+train_xreg_matrix <- as.matrix(train_xreg_ts)
+colnames(train_xreg_matrix) <- c("TotalPRCP") 
+
+# Fit the ARIMAX(6,1,7) model 
+model_arimax_6m <- tryCatch({
+  # Using forecast::Arima
+  Arima(train_log_price, order = c(6, 1, 7), xreg = train_xreg_matrix)
+}, error = function(e) {
+  cat("Error fitting Arima model:", conditionMessage(e), "\n")
+  return(NULL)
+})
+
+# Forecast on the Test Set ---
+if (!is.null(model_arimax_6m)) {
+
+  # Convert test_xreg_ts to matrix 
+  test_xreg_matrix <- as.matrix(test_xreg_ts)
+  colnames(test_xreg_matrix) <- c("TotalPRCP")
+  fc6_arimax <- forecast(model_arimax_6m, h = h6, xreg = test_xreg_matrix)
+
+  # Compute accuracy metrics using forecast::accuracy() on the log scale forecast object
+  accuracy6_log <- accuracy(fc6_arimax, test_log_price)
+  cat("ARIMAX(6,1,7) 6-Month Forecast Accuracy (Log Scale):\n")
+  print(accuracy6_log)
+
+    # Convert forecasts (mean) and actual test values back to the original price scale
+  fc6_orig <- exp(fc6_arimax$mean)
+  actual6_orig <- exp(test_log_price)
+
+  # Compute error metrics manually on the original scale
+  mae_orig <- mean(abs(fc6_orig - actual6_orig))
+  rmse_orig <- sqrt(mean((fc6_orig - actual6_orig)^2))
+  # Add a small epsilon to actual6_orig denominator to avoid division by zero if necessary
+  mape_orig <- mean(abs((fc6_orig - actual6_orig) / (actual6_orig + 1e-10))) * 100
+
+  # Print the results for the original scale
+  cat("\nARIMAX(6,1,7) 6-Month Forecast Accuracy on Original Scale:\n")
+  cat("MAE:", mae_orig, "\n")
+  cat("RMSE:", rmse_orig, "\n")
+  cat("MAPE:", mape_orig, "%\n")
+
+# Create a data frame for plogginb
+  df6_arimax <- data.frame(
+    Month = as.numeric(test_dates), # Use the numeric time index
+    Actual = as.numeric(actual6_orig),
+    Forecast = as.numeric(fc6_orig)
+  )
+
+  # Create the plot 
+  p6_arimax <- ggplot(df6_arimax, aes(x = Month)) +
+    geom_line(aes(y = Actual, color = "Actual"), linewidth = 1) +
+    geom_line(aes(y = Forecast, color = "Forecast"), linewidth = 1, linetype = "dashed") +
+    scale_color_manual(name = "Legend", values = c("Actual" = "blue", "Forecast" = "red")) + # Manual colors
+    labs(title = "ARIMAX(6,1,7) with Precipitation 6-Month Forecast vs Actual",
+         y = "Price (Original Scale)",
+         x = "Time Index") + 
+    theme_minimal() +
+    theme(legend.position = "top")
+
+  # Print the plot
+  print(p6_arimax)
+
+} else {
+  cat("Skipping prediction, evaluation, and plotting due to model fitting error.\n")
+}
+```
+
