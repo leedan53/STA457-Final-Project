@@ -1,0 +1,727 @@
+---
+title: "Untitled"
+output: pdf_document
+date: "2025-03-30"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load the necessary libraries
+library(tidyverse)
+library(ggplot2)
+library(forecast)
+library(zoo)
+library(dplyr)
+library(lubridate)
+library(timeSeries)
+library(fGarch)
+library(xts)
+library(rugarch)
+library(vars)
+library(ggplot2)
+library(tseries)
+library(astsa)
+library(readr)
+library(tidyr)
+```
+
+```{r}
+# Load the data
+Daily_prices <- read.csv("Daily Prices_ICCO.csv", header=TRUE, stringsAsFactors = FALSE)
+Ghana_temp_raw <- read.csv("Ghana_data.csv")
+Daily_prices_interpolate <-read.csv("Daily_prices_interpolate.csv") # Created from STA457_Preprocessing_Submission.Rmd
+```
+
+```{r}
+# Clean the futures price data
+# Displaying the price series
+Daily_prices$Date <- as.Date(Daily_prices$Date, format = "%d/%m/%Y")
+
+# Reverse Date column by ascending order
+Daily_prices <- Daily_prices[order(Daily_prices$Date), ]
+
+# Change string values into numeric
+Daily_prices$ICCO.daily.price..US..tonne. <- gsub(",", "", Daily_prices$ICCO.daily.price..US..tonne.)
+Daily_prices$ICCO.daily.price..US..tonne. <- as.numeric(Daily_prices$ICCO.daily.price..US..tonne.)
+
+# Check duplicates
+duplicates_date <- Daily_prices[duplicated(Daily_prices$Date) | duplicated(Daily_prices$Date, fromLast = TRUE), ]
+print(duplicates_date)
+
+# Add a duplicate index column for each Date
+Daily_prices <- Daily_prices %>%
+  group_by(Date) %>%
+  mutate(dup_index = row_number()) %>%
+  ungroup()
+
+# Remove duplicates
+remove_rows <- data.frame(
+  Date = as.Date(c("2023-12-15", "2024-01-09", "2024-01-30", "2024-01-31")),
+  dup_index = c(1, 1, 2, 2)
+)
+
+Daily_prices <- Daily_prices %>%
+  anti_join(remove_rows, by = c("Date", "dup_index"))
+
+# Convert the Date column to the first day of its month
+monthly_prices <- Daily_prices %>%
+  mutate(month = floor_date(Date, "month")) %>%
+  group_by(month) %>%
+  summarise(avg_price = mean(ICCO.daily.price..US..tonne., na.rm = TRUE))
+```
+
+# EDA, checking stationarity of the daily and monthly data. We use interpolated daily price data for univariate daily analysis
+```{r}
+# Ensure 'Date' in proper format
+Daily_prices_interpolate$Date <- as.Date(Daily_prices_interpolate$Date, format = "%Y-%m-%d")
+
+# Plot, ACF, ADF test of the interpolated daily price series
+plot(Daily_prices_interpolate$Date,
+     Daily_prices_interpolate$ICCO.daily.price..US..tonne.,
+     type = "l", 
+     xlab = "Date", 
+     ylab = "ICCO Daily Price (US$/tonne)",
+     main = "Daily ICCO Prices over Time")
+
+acf(Daily_prices_interpolate$ICCO.daily.price..US..tonne., 24)
+adf.test(Daily_prices_interpolate$ICCO.daily.price..US..tonne.)
+
+# Plot, ACF, ADF test of the monthly price series
+plot(monthly_prices,
+     type = "l",
+     xlab = "Date",
+     ylab = "ICCO Monthly Price (US$/tonne)",
+     main = "Monthly ICCO Prices over Time")
+acf(monthly_prices$avg_price, 24)
+adf.test(monthly_prices$avg_price)
+```
+## Since the monthly series is smoother than the daily price series, we infer that the reduced volatility may lead to better forecasting using time series models. 
+## The tailing off of the ACF, ADF p-values, and the skewness of the data indicates that neither the daily price time series nor the monthly price time series display stationarity.
+
+# Differencing and log transformations to reach stationarity
+```{r}
+# First-order differencing for daily prices
+diff_daily <- diff(Daily_prices_interpolate$ICCO.daily.price..US..tonne.)
+plot(diff_daily,
+     type="l",
+     main = "first-order differenced daily price")
+# First-order differencing for monthly prices
+diff_monthly <- diff(monthly_prices$avg_price)
+plot(diff_monthly,
+     type="l",
+     main = "first-order differenced monthly price")
+
+# Second-order differencing for daily prices
+diff_daily_2 <- diff(Daily_prices_interpolate$ICCO.daily.price..US..tonne., differences = 2)
+plot(diff_daily_2,
+     type="l",
+     main = "second-order differenced daily price")
+# Second-order differencing for monthly prices
+diff_monthly_2 <- diff(monthly_prices$avg_price, differences = 2)
+plot(diff_monthly_2,
+     type="l",
+     main = "second-order differenced monthly price")
+
+# log-transformations for reducing variance of the data, plot log-transformations
+log_daily <- log(Daily_prices_interpolate$ICCO.daily.price..US..tonne.)
+log_monthly <- log(monthly_prices$avg_price)
+
+plot(log_daily,
+     type="l",
+     main = "logged daily cocoa price")
+
+plot(log_monthly,
+     type="l",
+     main = "logged monthly cocoa price")
+
+# First-order differencing for log-transformed series'
+diff_log_daily <- diff(log_daily)
+diff_log_monthly <- diff(log_monthly)
+
+# Second-order differencing for log-transformed series'
+diff2_log_daily <- diff(log_daily, differences = 2)
+diff2_log_monthly <- diff(log_monthly, differences = 2)
+
+# Plot all of the differenced log-transformed data
+plot(diff_log_daily,
+     type="l",
+     main = "first-order differenced log daily price")
+plot(diff_log_monthly,
+     type="l",
+     main = "first-order differenced log monthly price")
+plot(diff2_log_daily,
+     type="l",
+     main = "second-order differenced log daily price")
+plot(diff2_log_monthly,
+     type="l",
+     main = "second-order differenced log monthly price")
+
+# acf and ADF test for all of the candidate transformations
+acf(diff_daily, 24)
+acf(diff_daily_2, 24)
+acf(diff_monthly, 24)
+acf(diff_monthly, 24)
+acf(diff_log_daily, 24)
+acf(diff2_log_daily, 24)
+acf(diff_log_monthly, 24)
+acf(diff2_log_monthly, 24)
+
+adf.test(diff_daily)
+adf.test(diff_daily_2)
+adf.test(diff_monthly)
+adf.test(diff_monthly_2)
+adf.test(diff_log_daily)
+adf.test(diff2_log_daily)
+adf.test(diff_log_monthly)
+adf.test(diff2_log_monthly)
+
+```
+## From performing differencing and log-transformations to the time series, we see that first-order differencing on log-transformations of both the month and daily cocoa prices series seem to generate appropriate stationary data for analysis. ADF tests also indicate stationarity, and thus we are able to move onto performing classical Time series methods onto log and first-order differenced daily and monthly cocoa prices.
+
+# Dependance orders, and grid-search for different ARIMA model considerations
+```{r}
+# Ljung-Box test function with standardized residuals
+plot_ljung_box <- function(model, model_name = deparse(substitute(model)), max_lag = 20) {
+  p_values <- sapply(1:max_lag, function(lag) Box.test(resid(model) / sqrt(model$sigma2),
+  lag = lag, type = "Ljung-Box")$p.value)
+  
+  df <- data.frame(Lag = 1:max_lag, P_Value = p_values)
+  
+  ggplot(df, aes(x = Lag, y = P_Value)) +
+    geom_point(shape = 1, size = 3) +  # Open circles
+    geom_hline(yintercept = 0.05, linetype = "dashed", color = "blue") +  # Significance threshold
+    ylim(0, 1) +
+    labs(title = paste("p values for Ljung-Box statistic for", model_name),
+         x = "LAG (H)",
+         y = "p value") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      axis.title = element_text(size = 12)
+    )
+}
+```
+
+```{r}
+# acf and pacf plots for the daily and monthly series
+acf2(diff_log_daily) # Looks like either ARIMA (0,1,3) or ARIMA (3,1,0) according to the plots
+acf2(diff_log_monthly) # Looks like either ARIMA (1,1,0) or ARIMA (0,1,1) according to the plots
+
+# Use candidate models of each of the series' on the log-transformed series to see fit
+model_daily_AR = arima(log_daily, order = c(3,1,0))
+model_daily_MA = arima(log_daily, order = c(0,1,3))
+
+model_monthly_AR = arima(log_monthly, order = c(1,1,0))
+model_monthly_MA = arima(log_monthly, order = c(0,1,1))
+
+# Check residual assumptions of the model
+## Ljung-box plots
+plot_ljung_box(model_daily_AR)
+plot_ljung_box(model_daily_MA)
+plot_ljung_box(model_monthly_AR)
+plot_ljung_box(model_monthly_MA)
+
+## Normal QQ plots
+stand_daily_AR = resid(model_daily_AR) / sqrt(model_daily_AR$sigma2)
+stand_daily_MA = resid(model_daily_MA) / sqrt(model_daily_MA$sigma2)
+stand_monthly_AR = resid(model_monthly_AR) / sqrt(model_monthly_AR$sigma2)
+stand_monthly_MA = resid(model_monthly_MA) / sqrt(model_monthly_MA$sigma2)
+
+qqnorm(stand_daily_AR)
+qqline(stand_daily_AR, col = "red", main = "QQ Plot for Daily Price AR component")
+
+qqnorm(stand_daily_MA)
+qqline(stand_daily_MA, col = "red", main = "QQ Plot for Daily Price MA component")
+
+qqnorm(stand_monthly_AR)
+qqline(stand_monthly_AR, col = "red", main = "QQ Plot for Monthly Price AR component")
+
+qqnorm(stand_monthly_MA)
+qqline(stand_monthly_MA, col = "red", main = "QQ Plot for Monthly Price MA component")
+
+## Summary of the models
+summary(model_daily_AR) # AIC = -65263.65, model coefficients to be separately shown
+summary(model_daily_MA) # AIC = -65263.62, model coefficients to be separately shown
+summary(model_monthly_AR) # AIC = -983.15, model coefficients to be separately shown
+summary(model_monthly_MA) # AIC = -983.43, model coefficients to be separately shown
+
+```
+# Logged daily series model fits are close, but not quite satisfy the residual assumptions whereas it is satisfied for the logged monthly series.
+# Given that we cannot make diagnostics on ARIMA models with both AR and MA components, we try out a grid search over AICs to find the best possible dependancy orders of possible arima functions. We suspect second-order differencing will be over-differencing the series, and only search each component up to dependancy order 10.
+```{r}
+# Define a grid search function based on AIC
+best_arima_model <- function(y, d, max.p = 10, max.q = 10) {
+  best_aic <- Inf
+  best_order <- c(0, d, 0)
+  best_fit <- NULL
+  
+  # Loop over all possible combinations of p and q up to the specified maximums
+  for (p in 0:max.p) {
+    for (q in 0:max.q) {
+      # Try fitting the model; if it fails, skip to the next combination
+      fit <- tryCatch({
+        arima(y, order = c(p, d, q))
+      }, error = function(e) NULL)
+      
+      if (!is.null(fit)) {
+        current_aic <- AIC(fit)
+        if (current_aic < best_aic) {
+          best_aic <- current_aic
+          best_order <- c(p, d, q)
+          best_fit <- fit
+        }
+      }
+    }
+  }
+  
+  # Return the best model along with its order and AIC value
+  return(list(model = best_fit, order = best_order, aic = best_aic))
+}
+
+# Return the best arima model for differencing order 1 based on AIC
+best_arima_model(log_monthly, d = 1, max.p = 10, max.q = 10)
+```
+
+## The Grid-search returns ARIMA(6,1,7) for the logged monthly series, which we will now perform residual analysis on.
+```{r}
+model_grid = arima(log_monthly, order = c(6,1,7))
+plot_ljung_box(model_grid)
+stand_grid = resid(model_grid) / sqrt(model_grid$sigma2)
+
+qqnorm(stand_grid)
+qqline(stand_grid, col = "red")
+```
+# One-step ahead forecasting plot for ARIMA(0,1,1), ARIMA(1,1,0), ARIMA(6,1,7) models
+
+```{r}
+# Un-log the series and check the forecasting <- Actual forecasting errors and residuals
+# ARIMA (1,1,0)
+# Compute the one-step-ahead forecasts in log-space (fitted values)
+fitted_values_log <- log_monthly - residuals(model_monthly_AR)
+
+# Optional bias adjustment: add sigma²/2 before exponentiating
+# If you want to apply bias correction, uncomment the next line:
+# fitted_values_original <- exp(fitted_values_log + model_arima_log$sigma2/2)
+
+# Otherwise, simply exponentiate:
+fitted_values_original <- exp(fitted_values_log)
+
+# Back-transform the actual (logged) series to the original scale
+actual_original <- exp(log_monthly)
+
+# Compute residuals on the original scale
+residuals_original <- actual_original - fitted_values_original
+
+# Plot the actual series and one-step ahead forecasts on the original scale
+plot(actual_original,
+     type = "l",
+     col = "black",
+     main = "Actual vs. One-step Ahead Forecasts (Original Scale) for ARIMA (1,1,0)",
+     ylab = "Cococa future prices",
+     xlab = "time (months)")
+
+lines(fitted_values_original,
+      col = "red",
+      lty = 2)
+
+legend("topleft",
+       legend = c("Actual", "Forecasted"),
+       col = c("black", "red"),
+       lty = c(1, 2))
+
+# Un-log the series and check the forecasting <- Actual forecasting errors and residuals
+# ARIMA (0,1,1)
+# Compute the one-step-ahead forecasts in log-space (fitted values)
+fitted_values_log <- log_monthly - residuals(model_monthly_MA)
+
+# Optional bias adjustment: add sigma²/2 before exponentiating
+# If you want to apply bias correction, uncomment the next line:
+# fitted_values_original <- exp(fitted_values_log + model_arima_log$sigma2/2)
+
+# Otherwise, simply exponentiate:
+fitted_values_original <- exp(fitted_values_log)
+
+# Back-transform the actual (logged) series to the original scale
+actual_original <- exp(log_monthly)
+
+# Compute residuals on the original scale
+residuals_original <- actual_original - fitted_values_original
+
+# Plot the actual series and one-step ahead forecasts on the original scale
+plot(actual_original,
+     type = "l",
+     col = "black",
+     main = "Actual vs. One-step Ahead Forecasts (Original Scale) for ARIMA (0,1,1)",
+     ylab = "Cococa future prices",
+     xlab = "time (months)")
+
+lines(fitted_values_original,
+      col = "red",
+      lty = 2)
+
+legend("topleft",
+       legend = c("Actual", "Forecasted"),
+       col = c("black", "red"),
+       lty = c(1, 2))
+
+# Un-log the series and check the forecasting <- Actual forecasting errors and residuals
+# ARIMA (6,1,7)
+# Compute the one-step-ahead forecasts in log-space (fitted values)
+fitted_values_log <- log_monthly - residuals(model_grid)
+
+# Optional bias adjustment: add sigma²/2 before exponentiating
+# If you want to apply bias correction, uncomment the next line:
+# fitted_values_original <- exp(fitted_values_log + model_arima_log$sigma2/2)
+
+# Otherwise, simply exponentiate:
+fitted_values_original <- exp(fitted_values_log)
+
+# Back-transform the actual (logged) series to the original scale
+actual_original <- exp(log_monthly)
+
+# Compute residuals on the original scale
+residuals_original <- actual_original - fitted_values_original
+
+# Plot the actual series and one-step ahead forecasts on the original scale
+plot(actual_original,
+     type = "l",
+     col = "black",
+     main = "Actual vs. One-step Ahead Forecasts (Original Scale) for ARIMA (6,1,7)",
+     ylab = "Cococa future prices",
+     xlab = "time (months)")
+
+lines(fitted_values_original,
+      col = "red",
+      lty = 2)
+
+legend("topleft",
+       legend = c("Actual", "Forecasted"),
+       col = c("black", "red"),
+       lty = c(1, 2))
+```
+
+
+# Forecasted vs Actual for the last year, last 6 months using train test split.
+
+## Using ARIMA (6,1,7) 
+```{r}
+# Determine the length of the logged time series
+n <- length(log_monthly)
+
+# --- For the last 6 months ---
+h6 <- 6
+train6 <- window(log_monthly, end = time(log_monthly)[n - h6])
+test6  <- window(log_monthly, start = time(log_monthly)[n - h6 + 1])
+
+# Fit the ARIMA(6,1,7) model on the training set for the 6-month hold-out
+model_6m <- arima(train6, order = c(6, 1, 7))
+fc6 <- forecast(model_6m, h = h6)
+
+# Convert forecasts and actual values back to the original scale
+fc6_orig <- exp(fc6$mean)
+actual6_orig <- exp(test6)
+
+# Compute accuracy metrics using the forecast package's accuracy() function
+accuracy6 <- accuracy(fc6, test6)
+cat("6-Month Forecast Accuracy:\n")
+print(accuracy6)
+
+# Create a data frame for plotting the 6-month hold-out results
+df6 <- data.frame(
+  Month = time(test6),
+  Actual = as.numeric(actual6_orig),
+  Forecast = as.numeric(fc6_orig)
+)
+
+# Plot Actual vs Forecast for the last 6 months
+p6 <- ggplot(df6, aes(x = Month)) +
+  geom_line(aes(y = Actual, color = "Actual"), size = 1) +
+  geom_line(aes(y = Forecast, color = "Forecast"), size = 1, linetype = "dashed") +
+  labs(title = "6-Month Forecast vs Actual (ARIMA (6,1,7))", y = "Price", color = "Legend") +
+  theme_minimal()
+print(p6)
+
+# --- For the last 12 months ---
+h12 <- 12
+train12 <- window(log_monthly, end = time(log_monthly)[n - h12])
+test12  <- window(log_monthly, start = time(log_monthly)[n - h12 + 1])
+
+# Fit the ARIMA(6,1,7) model on the training set for the 12-month hold-out
+model_12m <- Arima(train12, order = c(6, 1, 7))
+fc12 <- forecast(model_12m, h = h12)
+
+# Convert forecasts and actual values back to original scale
+fc12_orig <- exp(fc12$mean)
+actual12_orig <- exp(test12)
+
+# Compute accuracy metrics
+accuracy12 <- accuracy(fc12, test12)
+cat("12-Month Forecast Accuracy:\n")
+print(accuracy12)
+
+# Create a data frame for plotting the 12-month hold-out results
+df12 <- data.frame(
+  Month = time(test12),
+  Actual = as.numeric(actual12_orig),
+  Forecast = as.numeric(fc12_orig)
+)
+
+# Plot Actual vs Forecast for the last 12 months
+p12 <- ggplot(df12, aes(x = Month)) +
+  geom_line(aes(y = Actual, color = "Actual"), size = 1) +
+  geom_line(aes(y = Forecast, color = "Forecast"), size = 1, linetype = "dashed") +
+  labs(title = "12-Month Forecast vs Actual (ARIMA(6,1,7))", y = "Price", color = "Legend") +
+  theme_minimal()
+print(p12)
+
+# Convert forecasts and actual values back to the original scale
+fc6_orig <- exp(fc6$mean)
+actual6_orig <- exp(test6)
+
+# Compute error metrics on the original scale
+mae_orig <- mean(abs(fc6_orig - actual6_orig))
+rmse_orig <- sqrt(mean((fc6_orig - actual6_orig)^2))
+mape_orig <- mean(abs((fc6_orig - actual6_orig) / actual6_orig)) * 100
+
+# Print the results
+cat("6-Month Forecast Accuracy on Original Scale:\n")
+cat("MAE:", mae_orig, "\n")
+cat("RMSE:", rmse_orig, "\n")
+cat("MAPE:", mape_orig, "%\n")
+```
+## Using ARIMA (1,1,0)
+```{r}
+# Determine the length of the logged time series
+n <- length(log_monthly)
+
+# --- For the last 6 months ---
+h6 <- 6
+train6 <- window(log_monthly, end = time(log_monthly)[n - h6])
+test6  <- window(log_monthly, start = time(log_monthly)[n - h6 + 1])
+
+# Fit the ARIMA(1,1,0) model on the training set for the 6-month hold-out
+model_6m <- arima(train6, order = c(1, 1, 0))
+fc6 <- forecast(model_6m, h = h6)
+
+# Convert forecasts and actual values back to the original scale
+fc6_orig <- exp(fc6$mean)
+actual6_orig <- exp(test6)
+
+# Compute accuracy metrics using the forecast package's accuracy() function
+accuracy6 <- accuracy(fc6, test6)
+cat("6-Month Forecast Accuracy:\n")
+print(accuracy6)
+
+# Create a data frame for plotting the 6-month hold-out results
+df6 <- data.frame(
+  Month = time(test6),
+  Actual = as.numeric(actual6_orig),
+  Forecast = as.numeric(fc6_orig)
+)
+
+# Plot Actual vs Forecast for the last 6 months
+p6 <- ggplot(df6, aes(x = Month)) +
+  geom_line(aes(y = Actual, color = "Actual"), size = 1) +
+  geom_line(aes(y = Forecast, color = "Forecast"), size = 1, linetype = "dashed") +
+  labs(title = "6-Month Forecast vs Actual (ARIMA (1,1,0))", y = "Price", color = "Legend") +
+  theme_minimal()
+print(p6)
+
+# --- For the last 12 months ---
+h12 <- 12
+train12 <- window(log_monthly, end = time(log_monthly)[n - h12])
+test12  <- window(log_monthly, start = time(log_monthly)[n - h12 + 1])
+
+# Fit the ARIMA(1,1,0) model on the training set for the 12-month hold-out
+model_12m <- Arima(train12, order = c(1, 1, 0))
+fc12 <- forecast(model_12m, h = h12)
+
+# Convert forecasts and actual values back to original scale
+fc12_orig <- exp(fc12$mean)
+actual12_orig <- exp(test12)
+
+# Compute accuracy metrics
+accuracy12 <- accuracy(fc12, test12)
+cat("12-Month Forecast Accuracy:\n")
+print(accuracy12)
+
+# Create a data frame for plotting the 12-month hold-out results
+df12 <- data.frame(
+  Month = time(test12),
+  Actual = as.numeric(actual12_orig),
+  Forecast = as.numeric(fc12_orig)
+)
+
+# Plot Actual vs Forecast for the last 12 months
+p12 <- ggplot(df12, aes(x = Month)) +
+  geom_line(aes(y = Actual, color = "Actual"), size = 1) +
+  geom_line(aes(y = Forecast, color = "Forecast"), size = 1, linetype = "dashed") +
+  labs(title = "12-Month Forecast vs Actual (ARIMA(1,1,0))", y = "Price", color = "Legend") +
+  theme_minimal()
+print(p12)
+
+# Convert forecasts and actual values back to the original scale
+fc6_orig <- exp(fc6$mean)
+actual6_orig <- exp(test6)
+
+# Compute error metrics on the original scale
+mae_orig <- mean(abs(fc6_orig - actual6_orig))
+rmse_orig <- sqrt(mean((fc6_orig - actual6_orig)^2))
+mape_orig <- mean(abs((fc6_orig - actual6_orig) / actual6_orig)) * 100
+
+# Print the results
+cat("6-Month Forecast Accuracy on Original Scale:\n")
+cat("MAE:", mae_orig, "\n")
+cat("RMSE:", rmse_orig, "\n")
+cat("MAPE:", mape_orig, "%\n")
+```
+## Using ARIMA (0,1,1) Model
+```{r}
+# Determine the length of the logged time series
+n <- length(log_monthly)
+
+# --- For the last 6 months ---
+h6 <- 6
+train6 <- window(log_monthly, end = time(log_monthly)[n - h6])
+test6  <- window(log_monthly, start = time(log_monthly)[n - h6 + 1])
+
+# Fit the ARIMA(0,1,1) model on the training set for the 6-month hold-out
+model_6m <- arima(train6, order = c(0, 1, 1))
+fc6 <- forecast(model_6m, h = h6)
+
+# Convert forecasts and actual values back to the original scale
+fc6_orig <- exp(fc6$mean)
+actual6_orig <- exp(test6)
+
+# Compute accuracy metrics using the forecast package's accuracy() function
+accuracy6 <- accuracy(fc6, test6)
+cat("6-Month Forecast Accuracy:\n")
+print(accuracy6)
+
+# Create a data frame for plotting the 6-month hold-out results
+df6 <- data.frame(
+  Month = time(test6),
+  Actual = as.numeric(actual6_orig),
+  Forecast = as.numeric(fc6_orig)
+)
+
+# Plot Actual vs Forecast for the last 6 months
+p6 <- ggplot(df6, aes(x = Month)) +
+  geom_line(aes(y = Actual, color = "Actual"), size = 1) +
+  geom_line(aes(y = Forecast, color = "Forecast"), size = 1, linetype = "dashed") +
+  labs(title = "6-Month Forecast vs Actual (ARIMA (0,1,1))", y = "Price", color = "Legend") +
+  theme_minimal()
+print(p6)
+
+# --- For the last 12 months ---
+h12 <- 12
+train12 <- window(log_monthly, end = time(log_monthly)[n - h12])
+test12  <- window(log_monthly, start = time(log_monthly)[n - h12 + 1])
+
+# Fit the ARIMA(0,1,1) model on the training set for the 12-month hold-out
+model_12m <- Arima(train12, order = c(0, 1, 1))
+fc12 <- forecast(model_12m, h = h12)
+
+# Convert forecasts and actual values back to original scale
+fc12_orig <- exp(fc12$mean)
+actual12_orig <- exp(test12)
+
+# Compute accuracy metrics
+accuracy12 <- accuracy(fc12, test12)
+cat("12-Month Forecast Accuracy:\n")
+print(accuracy12)
+
+# Create a data frame for plotting the 12-month hold-out results
+df12 <- data.frame(
+  Month = time(test12),
+  Actual = as.numeric(actual12_orig),
+  Forecast = as.numeric(fc12_orig)
+)
+
+# Plot Actual vs Forecast for the last 12 months
+p12 <- ggplot(df12, aes(x = Month)) +
+  geom_line(aes(y = Actual, color = "Actual"), size = 1) +
+  geom_line(aes(y = Forecast, color = "Forecast"), size = 1, linetype = "dashed") +
+  labs(title = "12-Month Forecast vs Actual (ARIMA(0,1,1))", y = "Price", color = "Legend") +
+  theme_minimal()
+print(p12)
+
+# Convert forecasts and actual values back to the original scale
+fc6_orig <- exp(fc6$mean)
+actual6_orig <- exp(test6)
+
+# Compute error metrics on the original scale
+mae_orig <- mean(abs(fc6_orig - actual6_orig))
+rmse_orig <- sqrt(mean((fc6_orig - actual6_orig)^2))
+mape_orig <- mean(abs((fc6_orig - actual6_orig) / actual6_orig)) * 100
+
+# Print the results
+cat("6-Month Forecast Accuracy on Original Scale:\n")
+cat("MAE:", mae_orig, "\n")
+cat("RMSE:", rmse_orig, "\n")
+cat("MAPE:", mape_orig, "%\n")
+```
+## ARIMA models, with constant variance assumptions lead to a lot flatter, less volatile forecasts in comparison to the real data. Thus, we can infer that the variance of the log and differenced series is not captured not as well as it should be. 
+
+# Measuring the heteroscedasticity of the log-differenced series to show ARCH/GARCH models necessary for testing out
+
+## For Monthly Prices
+```{r}
+n_monthly <- nrow(monthly_prices)
+# Split into pre-2023 and post-2023
+pre_2023 <- monthly_prices$avg_price[1:(n_monthly-26)]
+post_2023 <- monthly_prices$avg_price[((n_monthly-26)+1):n_monthly]
+
+# Compute variances
+var_pre_2023 <- var(pre_2023)
+var_post_2023 <- var(post_2023)
+
+# Print the sample variances
+cat("Sample variance for monthly prices before 2023:", var_pre_2023, "\n")
+cat("Sample variance for monthly prices after 2023:", var_post_2023, "\n")
+
+```
+## Logged Monthly Prices
+```{r}
+n_monthly <- length(diff_log_monthly)
+
+# Split into half
+first_half_monthly <- diff_log_monthly[1:(n_monthly/2)]
+second_half_monthly <- diff_log_monthly[(n_monthly/2 + 1):n_monthly]
+
+# Compute sample variances for each half
+var_first_monthly <- var(first_half_monthly)
+var_second_monthly <- var(second_half_monthly)
+
+# Print the sample variances
+cat("Sample variance for the first half of the data:", var_first_monthly, "\n")
+cat("Sample variance for the second half of the data:", var_second_monthly, "\n")
+
+# Last year split
+split_year_monthly <- diff_log_monthly[1:(n_monthly - 12)]
+last_year_monthly <- diff_log_monthly[((n_monthly-12) + 1):n_monthly]
+
+# Compute sample variances for each half
+var_split_yr_monthly <- var(split_year_monthly)
+var_year_monthly <- var(last_year_monthly)
+
+# Print the sample variances
+cat("Sample variance until the last year of the data:", var_split_yr_monthly, "\n")
+cat("Sample variance for the last year of the data:", var_year_monthly, "\n")
+
+# Last 6 months split
+split_half_monthly <- diff_log_monthly[1:(n_monthly - 6)]
+half_year_monthly <- diff_log_monthly[((n_monthly-6) + 1):n_monthly]
+
+# Compute sample variances for each half
+var_split_yr_monthly <- var(split_half_monthly)
+var_year_monthly <- var(half_year_monthly)
+
+# Print the sample variances
+cat("Sample variance until the last 6 months of the data:", var_split_yr_monthly, "\n")
+cat("Sample variance for the last 6 months of the data:", var_year_monthly, "\n")
+```
+## Data shows high levels of heteroscedasticity, trying ARCH/GARCH may be necessary to model changing variance.
